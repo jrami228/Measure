@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -155,6 +156,10 @@
   .palette{display:flex;gap:6px;flex-wrap:wrap;padding:2px 0 0 21px}
   .palette .pc{width:18px;height:18px;border-radius:5px;border:2px solid transparent;cursor:pointer}
   .palette .pc.on{border-color:#fff}
+  .mcard .iconpick{display:flex;gap:2px;flex:0 0 auto;background:var(--panel-3);border:1px solid var(--line);border-radius:6px;padding:2px}
+  .mcard .iconpick .ic{width:21px;height:20px;display:grid;place-items:center;border:none;background:transparent;color:var(--ink-faint);border-radius:4px;font-size:11px;line-height:1;cursor:pointer}
+  .mcard .iconpick .ic.on{background:var(--panel);color:var(--ink)}
+  .mcard .iconpick .ic:hover{color:var(--ink)}
 
   .totals{padding:11px 14px;border-top:1px solid var(--line-soft);background:var(--panel-2)}
   .totline{display:flex;justify-content:space-between;align-items:baseline;font-size:12px;padding:3px 0}
@@ -271,6 +276,13 @@
       <option value="m">Meters</option>
       <option value="km">Kilometers</option>
     </select>
+
+    <div class="group">
+      <button class="tool" id="labelToggle" title="Label size — Fixed: stays constant on screen · Scaled: grows and shrinks with zoom">
+        <span style="font:800 14px/1 var(--ui);letter-spacing:-1px">A<span style="font-size:10px">a</span></span>
+        <span class="txt">Labels: <b id="labelModeTxt">Fixed</b></span>
+      </button>
+    </div>
 
     <div class="group">
       <button class="icon-btn" id="zOut" title="Zoom out (−)"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
@@ -446,7 +458,10 @@ function initApp(){
     hoverPt:null,        // current world pt under cursor
     selId:null,
     dragVertex:null,     // {annId, idx}
+    dragLabel:null,      // {annId, sx, sy, off0}
+    lboxes:{},           // id -> last-drawn label rect (screen px), for hit-testing
     unit:'ft',
+    labelMode:'fixed',   // 'fixed' (constant on-screen size) | 'scaled' (scales with zoom)
     nextId:1,
     history:[], hpos:-1, // undo stack of annotation snapshots (current page)
   };
@@ -471,6 +486,7 @@ function initApp(){
   /* ---------------- transforms ---------------- */
   // world (PDF points, top-left, y-down) <-> screen (CSS px in stageWrap)
   const w2sx=x=>S.panX+x*S.zoom, w2sy=y=>S.panY+y*S.zoom;
+  const w2s=p=>({x:S.panX+p.x*S.zoom, y:S.panY+p.y*S.zoom});
   const s2wx=x=>(x-S.panX)/S.zoom, s2wy=y=>(y-S.panY)/S.zoom;
 
   /* ---------------- PDF render (sharp, debounced) ---------------- */
@@ -527,6 +543,7 @@ function initApp(){
   function drawOverlay(){
     const w=overlay.width/S.dpr, h=overlay.height/S.dpr;
     octx.clearRect(0,0,w,h);
+    S.lboxes={};
     if(!loaded()) return;
     const list=anns();
     for(const a of list) drawAnn(a, a.id===S.selId);
@@ -540,23 +557,71 @@ function initApp(){
     octx.lineJoin='round'; octx.lineCap='round';
     if(a.type==='marker'){
       const p=P[0];
-      octx.fillStyle=c; octx.strokeStyle='#0c0f13'; octx.lineWidth=2;
-      octx.beginPath(); octx.arc(p.x,p.y,6,0,Math.PI*2); octx.fill(); octx.stroke();
-      labelChip(p.x,p.y-14,a.label||'Marker',c,'center',true);
+      drawMarkerSymbol(p.x,p.y,a.icon||'circle',c,selected);
+      drawLabelFor(a, a.label||'Marker', c, true, selected);
     } else if(a.type==='area'){
       octx.beginPath(); P.forEach((p,i)=>i?octx.lineTo(p.x,p.y):octx.moveTo(p.x,p.y)); octx.closePath();
       octx.fillStyle=hexA(c,.16); octx.fill();
       octx.strokeStyle=c; octx.lineWidth=selected?3:2; octx.stroke();
       drawVerts(P,c,selected);
-      const ctr=centroid(P); const m2=areaM2(a.points);
-      labelChip(ctr.x,ctr.y, (a.label?a.label+' · ':'')+fmtArea(m2), c,'center');
+      drawLabelFor(a, (a.label?a.label+' · ':'')+fmtArea(areaM2(a.points)), c, false, selected);
     } else { // distance or path
       octx.beginPath(); P.forEach((p,i)=>i?octx.lineTo(p.x,p.y):octx.moveTo(p.x,p.y));
       octx.strokeStyle=c; octx.lineWidth=selected?3:2; octx.stroke();
       drawVerts(P,c,selected);
-      const len=lenM(a.points);
-      const mid=P.length===2?{x:(P[0].x+P[1].x)/2,y:(P[0].y+P[1].y)/2}:P[Math.floor(P.length/2)];
-      labelChip(mid.x,mid.y-12,(a.label?a.label+' · ':'')+fmtLen(len),c,'center');
+      drawLabelFor(a, (a.label?a.label+' · ':'')+fmtLen(lenM(a.points)), c, false, selected);
+    }
+  }
+  // anchor point (world) that a label is tethered to
+  function worldCentroid(P){let x=0,y=0;P.forEach(p=>{x+=p.x;y+=p.y});return{x:x/P.length,y:y/P.length};}
+  function anchorWorld(a){
+    if(a.type==='marker') return {x:a.points[0].x,y:a.points[0].y};
+    if(a.type==='area') return worldCentroid(a.points);
+    const P=a.points;
+    return P.length===2?{x:(P[0].x+P[1].x)/2,y:(P[0].y+P[1].y)/2}:{x:P[Math.floor(P.length/2)].x,y:P[Math.floor(P.length/2)].y};
+  }
+  // default label offset (world units) — chosen to look like a sensible screen gap at creation
+  const DEF_OFF_SCREEN={marker:{dx:18,dy:-18},distance:{dx:0,dy:-16},path:{dx:0,dy:-16},area:{dx:0,dy:0}};
+  function defaultOff(a){ const d=DEF_OFF_SCREEN[a.type]||{dx:0,dy:-16}; const z=S.zoom||1; return {dx:d.dx/z,dy:d.dy/z}; }
+  function ensureOff(a){ if(!a.labelOff) a.labelOff=defaultOff(a); return a.labelOff; }
+
+  // draws the leader line + label box, tethered to the annotation's anchor; caches the box for hit-testing
+  function drawLabelFor(a,text,color,solid,selected){
+    const k=labelK();
+    const aS=w2s(anchorWorld(a));
+    const off=ensureOff(a);
+    const L={x:aS.x+off.dx*S.zoom, y:aS.y+off.dy*S.zoom};
+    const lead=Math.hypot(L.x-aS.x,L.y-aS.y);
+    // leader (black core + white halo, like a survey callout), starting just off the feature
+    if(lead>7){
+      const ang=Math.atan2(L.y-aS.y,L.x-aS.x), gap=a.type==='marker'?9:3;
+      const s0={x:aS.x+Math.cos(ang)*gap, y:aS.y+Math.sin(ang)*gap};
+      octx.lineCap='round';
+      octx.strokeStyle='rgba(255,255,255,.92)'; octx.lineWidth=3.4; octx.beginPath(); octx.moveTo(s0.x,s0.y); octx.lineTo(L.x,L.y); octx.stroke();
+      octx.strokeStyle=color; octx.lineWidth=1.5; octx.beginPath(); octx.moveTo(s0.x,s0.y); octx.lineTo(L.x,L.y); octx.stroke();
+      octx.fillStyle=color; octx.beginPath(); octx.arc(L.x,L.y,2.4,0,Math.PI*2); octx.fill();
+    }
+    const fs=11.5*k, padX=6*k, padY=4*k, r=5*k;
+    octx.font='600 '+fs+'px '+getCSS('--mono');
+    const tw=octx.measureText(text).width, w=tw+padX*2, h=fs+padY*2;
+    const flip=off.dx<0;
+    const bx=flip?L.x-w:L.x, by=L.y-h/2;
+    octx.fillStyle=solid?color:'rgba(15,18,22,.92)';
+    roundRect(bx,by,w,h,r); octx.fill();
+    octx.strokeStyle=selected?'#fff':(solid?'rgba(0,0,0,.3)':hexA(color,.7)); octx.lineWidth=Math.max(1,(selected?1.6:1)*k); roundRect(bx,by,w,h,r); octx.stroke();
+    octx.fillStyle=solid?'#0c0f13':'#fff'; octx.textAlign='left'; octx.textBaseline='middle';
+    octx.fillText(text,bx+padX,by+h/2+.5);
+    S.lboxes[a.id]={x:bx,y:by,w,h};
+  }
+  function drawMarkerSymbol(x,y,icon,c,selected){
+    octx.lineJoin='round';
+    if(selected){ octx.beginPath(); octx.arc(x,y,11,0,Math.PI*2); octx.strokeStyle=hexA(c,.9); octx.lineWidth=2; octx.stroke(); }
+    octx.fillStyle=c; octx.strokeStyle='#0c0f13'; octx.lineWidth=2;
+    if(icon==='triangle'){
+      octx.beginPath(); octx.moveTo(x,y-8); octx.lineTo(x+7.5,y+6); octx.lineTo(x-7.5,y+6); octx.closePath();
+      octx.fill(); octx.stroke();
+    }else{
+      octx.beginPath(); octx.arc(x,y,6,0,Math.PI*2); octx.fill(); octx.stroke();
     }
   }
   function drawVerts(P,c,selected){
@@ -585,16 +650,7 @@ function initApp(){
     }
     if(hp){ octx.beginPath(); octx.arc(hp.x,hp.y,4,0,Math.PI*2); octx.fillStyle='#fff'; octx.strokeStyle=c; octx.lineWidth=2; octx.fill(); octx.stroke(); }
   }
-  function labelChip(x,y,text,color,align,solid){
-    octx.font='600 11.5px '+getCSS('--mono');
-    const pad=5, tw=octx.measureText(text).width, w=tw+pad*2, h=18;
-    let lx=align==='center'?x-w/2:x;
-    octx.fillStyle=solid?color:'rgba(15,18,22,.9)';
-    roundRect(lx,y-h/2,w,h,5); octx.fill();
-    octx.strokeStyle=solid?'rgba(0,0,0,.25)':hexA(color,.6); octx.lineWidth=1; roundRect(lx,y-h/2,w,h,5); octx.stroke();
-    octx.fillStyle=solid?'#0c0f13':'#fff'; octx.textAlign='left'; octx.textBaseline='middle';
-    octx.fillText(text,lx+pad,y+.5);
-  }
+  function labelK(){ return S.labelMode==='scaled' ? S.zoom : 1; }
   function roundRect(x,y,w,h,r){octx.beginPath();octx.moveTo(x+r,y);octx.arcTo(x+w,y,x+w,y+h,r);octx.arcTo(x+w,y+h,x,y+h,r);octx.arcTo(x,y+h,x,y,r);octx.arcTo(x,y,x+w,y,r);octx.closePath();}
   function getCSS(v){return getComputedStyle(document.documentElement).getPropertyValue(v)||'monospace';}
   function hexA(hex,a){ if(hex.startsWith('var'))hex='#ff7a00'; const n=hex.replace('#',''); const r=parseInt(n.substr(0,2),16),g=parseInt(n.substr(2,2),16),b=parseInt(n.substr(4,2),16); return `rgba(${r},${g},${b},${a})`; }
@@ -686,7 +742,8 @@ function initApp(){
       distance:['Click a start point, then an end point',''],
       path:['Click to add points along a path','double-click or Enter to finish'],
       area:['Click around an area','double-click or Enter to close the polygon'],
-      marker:['Click to drop a labeled marker',''],
+      marker:['Click to drop markers — keep clicking to add more','auto-numbers & inherits style from the last marker'],
+      select:['Drag a label to reposition it — it stays tethered to its feature','drag vertices to reshape · click to select'],
     };
     if(msg[t]){ hintText.textContent=msg[t][0]; hintMini.textContent=msg[t][1]; hint.classList.add('show'); hintDismiss.style.display='none'; }
     else hint.classList.remove('show');
@@ -706,7 +763,10 @@ function initApp(){
     if(e.button!==0) return;
 
     if(S.tool==='select'){
-      // vertex drag?
+      // 1) label drag (highest priority — labels sit on top)
+      const lab=hitLabel(localPt(e));
+      if(lab){ S.dragLabel={annId:lab.id, sx:e.clientX, sy:e.clientY, off0:{...ensureOff(lab)}}; S.selId=lab.id; renderList(); drawOverlay(); return; }
+      // 2) vertex drag
       const hit=hitVertex(localPt(e));
       if(hit){ S.dragVertex=hit; S.selId=hit.annId; renderList(); drawOverlay(); return; }
       const a=hitAnn(localPt(e));
@@ -734,11 +794,17 @@ function initApp(){
       S.panX=panStart.px+(e.clientX-panStart.x); S.panY=panStart.py+(e.clientY-panStart.y);
       scheduleRender(); drawOverlay(); return;
     }
+    if(S.dragLabel){
+      const a=anns().find(x=>x.id===S.dragLabel.annId);
+      if(a){ a.labelOff={ dx:S.dragLabel.off0.dx+(e.clientX-S.dragLabel.sx)/S.zoom, dy:S.dragLabel.off0.dy+(e.clientY-S.dragLabel.sy)/S.zoom }; drawOverlay(); }
+      return;
+    }
     if(S.dragVertex){
       const a=anns().find(x=>x.id===S.dragVertex.annId);
       if(a){ const wp=worldPt(e); a.points[S.dragVertex.idx]={x:wp.x,y:wp.y}; drawOverlay(); renderList(); }
       return;
     }
+    if(S.tool==='select'){ overlay.style.cursor = hitLabel(lp)?'move':(hitVertex(lp)?'pointer':''); }
     if(DRAW_TOOLS.has(S.tool)&&S.draft){
       S.hoverPt=worldPt(e); drawOverlay(); liveForDraft(); showCursorBadge(lp);
     }else if(DRAW_TOOLS.has(S.tool)){
@@ -748,6 +814,7 @@ function initApp(){
 
   overlay.addEventListener('pointerup',e=>{
     if(panning){ panning=false; stageWrap.classList.remove('panning'); }
+    if(S.dragLabel){ pushHistory(); S.dragLabel=null; }
     if(S.dragVertex){ pushHistory(); S.dragVertex=null; }
     downPt=null;
   });
@@ -787,6 +854,11 @@ function initApp(){
   function showCursorCoord(lp){ cursorBadge.style.display='none'; }
 
   /* ---------------- hit testing ---------------- */
+  function hitLabel(lp){
+    const list=anns();
+    for(let i=list.length-1;i>=0;i--){ const b=S.lboxes[list[i].id]; if(b&&lp.x>=b.x&&lp.x<=b.x+b.w&&lp.y>=b.y&&lp.y<=b.y+b.h) return list[i]; }
+    return null;
+  }
   function hitAnn(lp){
     const TH=8;
     const list=anns();
@@ -811,11 +883,26 @@ function initApp(){
 
   /* ---------------- annotation lifecycle ---------------- */
   function newId(){return S.nextId++;}
+  function nextLabel(label){
+    if(!label) return '';
+    const m=label.match(/^(.*?)(\d+)(\s*)$/);   // trailing integer (e.g. MW-1, SB-09, Well 3)
+    if(!m) return label;                         // no number → reuse the same name
+    const inc=String(parseInt(m[2],10)+1).padStart(m[2].length,'0');  // preserve zero-padding
+    return m[1]+inc+m[3];
+  }
   function addMarker(wp){
-    const a={id:newId(),type:'marker',points:[{x:wp.x,y:wp.y}],label:'',color:DEFCOLOR.marker};
-    anns().push(a); S.selId=a.id; setTool('select'); renderList(); drawOverlay();
-    // focus its label for inline naming
-    setTimeout(()=>{const inp=document.querySelector(`.mcard[data-id="${a.id}"] input.lbl`);inp&&inp.focus();},30);
+    const ms=anns().filter(a=>a.type==='marker');
+    const prev=ms.length?ms[ms.length-1]:null;   // most recent marker = the template
+    const a={
+      id:newId(), type:'marker', points:[{x:wp.x,y:wp.y}],
+      label: prev?nextLabel(prev.label):'',
+      color: prev?prev.color:DEFCOLOR.marker,
+      icon:  prev?(prev.icon||'circle'):'circle',
+    };
+    anns().push(a); S.selId=a.id;
+    renderList(); drawOverlay();
+    // Marker tool stays active so clicks keep dropping markers. Nudge naming only on the first one.
+    if(!prev){ setTimeout(()=>{const inp=document.querySelector(`.mcard[data-id="${a.id}"] input.lbl`);inp&&inp.focus();},30); }
   }
   function finishDraft(fromDbl){
     const d=S.draft; if(!d){return;}
@@ -876,6 +963,10 @@ function initApp(){
       card.innerHTML=`
         <div class="row1">
           <span class="swatch" style="background:${c}" title="Change color"></span>
+          ${a.type==='marker'?`<span class="iconpick" title="Marker icon">
+            <button class="ic ${(a.icon||'circle')==='circle'?'on':''}" data-icon="circle" title="Dot">\u25CF</button>
+            <button class="ic ${a.icon==='triangle'?'on':''}" data-icon="triangle" title="Triangle">\u25B2</button>
+          </span>`:''}
           <input class="lbl" value="${escapeHtml(a.label||'')}" placeholder="${TYPELABEL[a.type]==='PIN'?'Marker':TYPELABEL[a.type].charAt(0)+TYPELABEL[a.type].slice(1).toLowerCase()} name…">
           <span class="typetag" style="background:${TYPECOLOR[a.type]}">${TYPELABEL[a.type]}</span>
         </div>
@@ -892,7 +983,8 @@ function initApp(){
       card.querySelector('.swatch').addEventListener('click',()=>togglePalette(card,a));
       card.querySelector('.del').addEventListener('click',()=>deleteAnn(a.id));
       card.querySelector('.focus').addEventListener('click',()=>focusAnn(a));
-      card.addEventListener('click',ev=>{ if(ev.target.closest('input,button,.swatch,.palette'))return; S.selId=a.id; markSel(); drawOverlay(); });
+      if(a.type==='marker') card.querySelectorAll('.iconpick .ic').forEach(btn=>btn.addEventListener('click',()=>{a.icon=btn.dataset.icon;renderList();drawOverlay();}));
+      card.addEventListener('click',ev=>{ if(ev.target.closest('input,button,.swatch,.palette,.iconpick'))return; S.selId=a.id; markSel(); drawOverlay(); });
       listEl.appendChild(card);
     });
     totalsEl.style.display='block';
@@ -1070,25 +1162,50 @@ function initApp(){
   }
   // shared: draw one page's annotations using a coordinate converter (world -> pdf points)
   function drawAnnotations(pg, conv, data, font, fontB){
-    const {rgb}=PDFLib;
+    const {rgb,pushGraphicsState,popGraphicsState,moveTo,lineTo,closePath,fillAndStroke,setFillingColor,setStrokingColor,setLineWidth}=PDFLib;
     const C=hex=>{const n=(hex||'#ff7a00').replace('#','');return rgb(parseInt(n.substr(0,2),16)/255,parseInt(n.substr(2,2),16)/255,parseInt(n.substr(4,2),16)/255);};
     for(const a of data.annotations){
       const col=C(colorOf(a)); const P=a.points.map(conv);
+      const aw=anchorWorld(a); const aP=conv(aw);
+      const off=a.labelOff||defaultOff(a);
+      const lP=conv({x:aw.x+off.dx,y:aw.y+off.dy}); const flip=off.dx<0;
+      const text = a.type==='marker' ? (a.label||'')
+                 : a.type==='area'   ? (a.label?a.label+'  ':'')+fmtAreaPlain(areaM2(a.points))
+                 :                     (a.label?a.label+'  ':'')+fmtLenPlain(lenM(a.points));
       if(a.type==='marker'){
-        const p=P[0]; pg.drawCircle({x:p.x,y:p.y,size:4,color:col,borderColor:rgb(0,0,0),borderWidth:1});
-        if(a.label) drawLabel(pg,font,a.label,p.x,p.y+8,col);
+        if(text) leaderLine(pg,aP,lP,col);
+        if((a.icon||'circle')==='triangle'){
+          pg.pushOperators(
+            pushGraphicsState(), setFillingColor(col), setStrokingColor(rgb(0,0,0)), setLineWidth(1),
+            moveTo(aP.x,aP.y+6), lineTo(aP.x+5,aP.y-4), lineTo(aP.x-5,aP.y-4), closePath(),
+            fillAndStroke(), popGraphicsState()
+          );
+        }else{
+          pg.drawCircle({x:aP.x,y:aP.y,size:4,color:col,borderColor:rgb(0,0,0),borderWidth:1});
+        }
+        if(text) labelBox(pg,font,lP,text,col,flip);
       }else if(a.type==='area'){
         for(let i=0;i<P.length;i++){const p=P[i],q=P[(i+1)%P.length];pg.drawLine({start:p,end:q,thickness:1.6,color:col});}
-        const ctr=cen(P); const m2=areaM2(a.points);
-        drawLabel(pg,fontB,(a.label?a.label+'  ':'')+fmtAreaPlain(m2),ctr.x,ctr.y,col);
+        leaderLine(pg,aP,lP,col); labelBox(pg,fontB,lP,text,col,flip);
       }else{
         for(let i=1;i<P.length;i++) pg.drawLine({start:P[i-1],end:P[i],thickness:1.6,color:col});
         P.forEach(p=>pg.drawCircle({x:p.x,y:p.y,size:2.2,color:col}));
-        const mid=P.length===2?{x:(P[0].x+P[1].x)/2,y:(P[0].y+P[1].y)/2}:P[Math.floor(P.length/2)];
-        drawLabel(pg,fontB,(a.label?a.label+'  ':'')+fmtLenPlain(lenM(a.points)),mid.x,mid.y+6,col);
+        leaderLine(pg,aP,lP,col); labelBox(pg,fontB,lP,text,col,flip);
       }
     }
     if(data.cal){ pg.drawText('Scale set · '+num(1*U[S.unit]/data.cal.metersPerPx)+' px = 1 '+UNAME[S.unit],{x:8,y:8,size:7,font,color:rgb(.3,.3,.3)}); }
+  }
+  function leaderLine(pg,aP,lP,col){
+    const {rgb}=PDFLib; const d=Math.hypot(lP.x-aP.x,lP.y-aP.y); if(d<6) return;
+    pg.drawLine({start:aP,end:lP,thickness:3,color:rgb(1,1,1)});      // white halo
+    pg.drawLine({start:aP,end:lP,thickness:1.3,color:col});          // colored core
+    pg.drawCircle({x:lP.x,y:lP.y,size:1.6,color:col});
+  }
+  function labelBox(pg,font,lP,text,col,flip){
+    const {rgb}=PDFLib; const size=8.5, padX=3, w=font.widthOfTextAtSize(text,size), bw=w+padX*2, bh=size+5;
+    const x0=flip?lP.x-bw:lP.x, cy=lP.y;
+    pg.drawRectangle({x:x0,y:cy-bh/2,width:bw,height:bh,color:rgb(1,1,1),opacity:.9,borderColor:col,borderWidth:.7});
+    pg.drawText(text,{x:x0+padX,y:cy-size/2+1.5,size,font,color:rgb(.07,.09,.11)});
   }
   async function exportPdfSource(){
     busy('Building annotated PDF…');
@@ -1140,12 +1257,6 @@ function initApp(){
       c.toBlob(b=>{ if(!b)return rej(new Error('rasterize failed')); b.arrayBuffer().then(ab=>res(new Uint8Array(ab))); },'image/png');
     });
   }
-  function cen(P){let x=0,y=0;P.forEach(p=>{x+=p.x;y+=p.y});return{x:x/P.length,y:y/P.length};}
-  function drawLabel(pg,font,text,x,y,col){
-    const {rgb}=PDFLib; const size=8; const w=font.widthOfTextAtSize(text,size);
-    pg.drawRectangle({x:x-w/2-3,y:y-2,width:w+6,height:size+4,color:rgb(1,1,1),opacity:.85,borderColor:col,borderWidth:.6});
-    pg.drawText(text,{x:x-w/2,y:y+0.5,size,font,color:rgb(.07,.09,.11)});
-  }
   function fmtLenPlain(m){return m==null?'(no scale)':num(m/U[S.unit])+' '+UNAME[S.unit];}
   function fmtAreaPlain(m2){if(m2==null)return '(no scale)';let s=num(m2/(U[S.unit]**2))+' '+UNAME[S.unit]+'\u00B2';if(S.unit==='ft'){const ac=m2/4046.8564224;if(ac>=0.01)s+=' / '+num(ac)+' ac';}return s;}
 
@@ -1155,7 +1266,7 @@ function initApp(){
     try{
       // strip transient runtime bits from the live DOM clone
       const session={
-        v:3, srcType:S.srcType, unit:S.unit, pageNum:S.pageNum, nextId:S.nextId,
+        v:3, srcType:S.srcType, unit:S.unit, labelMode:S.labelMode, pageNum:S.pageNum, nextId:S.nextId,
         view:{zoom:S.zoom,panX:S.panX,panY:S.panY},
         pages:{},
       };
@@ -1189,6 +1300,7 @@ function initApp(){
     busy('Restoring session…');
     try{
       S.unit=s.unit||'ft'; $('#unitSel').value=S.unit;
+      S.labelMode=s.labelMode||'fixed'; applyLabelModeUI();
       S.nextId=s.nextId||1;
       S.srcType=s.srcType||'pdf';
       S.pages={};
@@ -1230,6 +1342,8 @@ function initApp(){
   /* ---------------- wiring ---------------- */
   document.querySelectorAll('.tool').forEach(b=>b.addEventListener('click',()=>setTool(b.dataset.tool)));
   $('#unitSel').addEventListener('change',e=>{S.unit=e.target.value;renderList();drawOverlay();updateCalCard();});
+  function applyLabelModeUI(){ $('#labelModeTxt').textContent=S.labelMode==='scaled'?'Scaled':'Fixed'; $('#labelToggle').classList.toggle('active',S.labelMode==='scaled'); }
+  $('#labelToggle').addEventListener('click',()=>{ S.labelMode=S.labelMode==='fixed'?'scaled':'fixed'; applyLabelModeUI(); drawOverlay(); toast('Labels: '+(S.labelMode==='scaled'?'scale with zoom':'fixed on screen')); });
   $('#zIn').onclick=()=>zoomCentered(1.25); $('#zOut').onclick=()=>zoomCentered(1/1.25); $('#zFit').onclick=fitToView;
   function zoomCentered(f){const r=stageWrap.getBoundingClientRect();const lp={x:r.width/2,y:r.height/2};setZoom(S.zoom*f,s2wx(lp.x),s2wy(lp.y),lp);}
   $('#pgPrev').onclick=()=>gotoPage(S.pageNum-1); $('#pgNext').onclick=()=>gotoPage(S.pageNum+1);
