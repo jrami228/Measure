@@ -587,6 +587,9 @@ function initApp(){
     if(a.type==='marker') return {x:a.points[0].x,y:a.points[0].y};
     if(a.type==='area') return worldCentroid(a.points);
     const P=a.points;
+    if(a.type==='distance' && P.length>=2){   // 3/4 along the line (toward the end), not the center
+      const t=0.75; return {x:P[0].x+(P[1].x-P[0].x)*t, y:P[0].y+(P[1].y-P[0].y)*t};
+    }
     return P.length===2?{x:(P[0].x+P[1].x)/2,y:(P[0].y+P[1].y)/2}:{x:P[Math.floor(P.length/2)].x,y:P[Math.floor(P.length/2)].y};
   }
   // label offset canonical unit = screen px at 100% zoom.
