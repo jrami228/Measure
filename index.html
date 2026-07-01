@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -61,12 +62,9 @@
   .icon-btn:disabled{opacity:.35;cursor:default}
 
   .zoomlevel{font:600 12px/1 var(--mono);min-width:46px;text-align:center;color:var(--ink-dim)}
-  .slider-wrap{display:flex;align-items:center;gap:8px;padding:0 6px}
-  input[type=range].lsize{-webkit-appearance:none;appearance:none;width:88px;height:4px;border-radius:3px;background:var(--line);outline:none;cursor:pointer}
-  input[type=range].lsize::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:14px;height:14px;border-radius:50%;background:var(--accent);border:2px solid #1a1f26;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.4)}
-  input[type=range].lsize::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--accent);border:2px solid #1a1f26;cursor:pointer}
-  input[type=range].lsize::-moz-range-track{height:4px;border-radius:3px;background:var(--line)}
   #labelSizePct{min-width:42px}
+  #lblSmaller,#lblLarger{gap:0}
+  #lblSmaller svg,#lblLarger svg{margin-left:1px}
 
   select.units{
     height:36px;border:1px solid var(--line);background:var(--panel-2);color:var(--ink);
@@ -288,10 +286,9 @@
         <span class="txt">Labels: <b id="labelModeTxt">Scaled</b></span>
       </button>
       <div class="sep"></div>
-      <div class="slider-wrap" title="Label size — scales all measurement labels">
-        <input type="range" class="lsize" id="labelSize" min="0.5" max="3" step="0.05" value="1" aria-label="Label size">
-        <span class="zoomlevel" id="labelSizePct">100%</span>
-      </div>
+      <button class="icon-btn" id="lblSmaller" title="Smaller labels"><span style="font:800 12px/1 var(--ui)">A</span><svg viewBox="0 0 24 24" style="width:12px;height:12px"><path d="M5 12h14"/></svg></button>
+      <span class="zoomlevel" id="labelSizePct" title="Label size">100%</span>
+      <button class="icon-btn" id="lblLarger" title="Larger labels"><span style="font:800 15px/1 var(--ui)">A</span><svg viewBox="0 0 24 24" style="width:12px;height:12px"><path d="M12 5v14M5 12h14"/></svg></button>
     </div>
 
     <div class="group">
@@ -464,6 +461,7 @@ function initApp(){
     zoom:1, panX:0, panY:0, dpr:Math.max(1,window.devicePixelRatio||1),
     tool:'pan',
     pages:{},            // pageNum -> {annotations:[], cal:{metersPerPx}|null}
+    docCal:null,         // document-wide calibration — one scale for every page unless a page overrides it
     draft:null,          // {type,points:[{x,y}],color}
     hoverPt:null,        // current world pt under cursor
     selId:null,
@@ -490,7 +488,7 @@ function initApp(){
 
   function curPage(){ if(!S.pages[S.pageNum]) S.pages[S.pageNum]={annotations:[],cal:null}; return S.pages[S.pageNum]; }
   function anns(){ return curPage().annotations; }
-  function cal(){ return curPage().cal; }
+  function cal(){ return curPage().cal || S.docCal || null; }
   function loaded(){ return !!(S.page||S.img); }       // a map (pdf page or image) is open
   function hasAnnotations(){ return Object.values(S.pages).some(p=>p.annotations&&p.annotations.length); }
 
@@ -674,8 +672,8 @@ function initApp(){
   function segPx(a,b){return Math.hypot(a.x-b.x,a.y-b.y);}
   function pathPx(pts){let s=0;for(let i=1;i<pts.length;i++)s+=segPx(pts[i-1],pts[i]);return s;}
   function shoelacePx(pts){let s=0;for(let i=0;i<pts.length;i++){const a=pts[i],b=pts[(i+1)%pts.length];s+=a.x*b.y-b.x*a.y;}return Math.abs(s)/2;}
-  function lenM(pts){const c=cal();return c?pathPx(pts)*c.metersPerPx:null;}
-  function areaM2(pts){const c=cal();return c?shoelacePx(pts)*c.metersPerPx*c.metersPerPx:null;}
+  function lenM(pts,c){c=c||cal();return c?pathPx(pts)*c.metersPerPx:null;}
+  function areaM2(pts,c){c=c||cal();return c?shoelacePx(pts)*c.metersPerPx*c.metersPerPx:null;}
 
   function fmtLen(m){
     if(m==null) return '— (set scale)';
@@ -1029,7 +1027,9 @@ function initApp(){
       calState.classList.add('set'); calTitle.textContent='Scale set';
       const oneUnit=1*U[S.unit]; const pxPerUnit=oneUnit/c.metersPerPx;
       const pxw=S.srcType==='image'?'px':'pt';
-      calDetail.textContent=`${num(pxPerUnit)} ${pxw} per ${UNAME[S.unit]}  ·  1 ${pxw} = ${num(c.metersPerPx/U[S.unit])} ${UNAME[S.unit]}`;
+      let scope='';
+      if(S.numPages>1) scope = curPage().cal ? '  ·  this page only' : '  ·  all pages';
+      calDetail.textContent=`${num(pxPerUnit)} ${pxw} per ${UNAME[S.unit]}  ·  1 ${pxw} = ${num(c.metersPerPx/U[S.unit])} ${UNAME[S.unit]}${scope}`;
       $('#calRingIcon').setAttribute('d','M20 6L9 17l-5-5');
       calClear.style.display='block';
     }else{
@@ -1076,15 +1076,16 @@ function initApp(){
       if(!(v>0)){toast('Enter the real distance','err');return;}
       metersPerPx=(v*U[unit])/pendingCalPx;
     }
-    curPage().cal={metersPerPx};
+    S.docCal={metersPerPx};      // one scale for the whole PDF
+    curPage().cal=null;          // drop any page-specific override so the doc scale applies here too
     $('#calModal').classList.remove('show');
     hint.classList.remove('show');
     renderList(); drawOverlay(); updateCalCard();
-    toast('Scale set — measurements are now to scale');
+    toast(S.numPages>1?'Scale set for every page':'Scale set — measurements are now to scale');
     if(S.tool==='calibrate') setTool('distance');
   };
   $('#calBtn').onclick=()=>{ if(cal()&&ratioAllowed()){openCalModal('ratio');} else { setTool('calibrate'); toast('Click two points of known distance'); } };
-  $('#calClear').onclick=()=>{ curPage().cal=null; renderList(); drawOverlay(); updateCalCard(); toast('Scale cleared','err'); };
+  $('#calClear').onclick=()=>{ S.docCal=null; curPage().cal=null; renderList(); drawOverlay(); updateCalCard(); toast('Scale cleared','err'); };
 
   /* ---------------- file load ---------------- */
   async function loadFromBytes(bytes, fileName){
@@ -1094,7 +1095,7 @@ function initApp(){
       S.pdfBytes=bytes.slice(0);                       // keep pristine copy for export/save
       const doc=await pdfjsLib.getDocument({data:bytes.slice(0)}).promise;
       S.pdfDoc=doc; S.numPages=doc.numPages; S.pageNum=1;
-      S.pages={};
+      S.pages={}; S.docCal=null;
       await openPage(1);
       drop.classList.add('hidden');
       $('#pageNav').style.display=S.numPages>1?'flex':'none';
@@ -1115,7 +1116,7 @@ function initApp(){
       S.img=await loadImg(url);
       if(!S.img.naturalWidth){ throw new Error('empty image'); }
       S.baseW=S.img.naturalWidth; S.baseH=S.img.naturalHeight;
-      S.numPages=1; S.pageNum=1; S.pages={1:{annotations:[],cal:null}};
+      S.numPages=1; S.pageNum=1; S.pages={1:{annotations:[],cal:null}}; S.docCal=null;
       S.history=[]; S.hpos=-1; S.selId=null; S.draft=null;
       drop.classList.add('hidden');
       $('#pageNav').style.display='none';
@@ -1174,9 +1175,12 @@ function initApp(){
     if(!loaded()) return;
     return S.srcType==='image' ? exportImageSource() : exportPdfSource();
   }
-  // shared: draw one page's annotations using a coordinate converter (world -> pdf points)
-  function drawAnnotations(pg, conv, data, font, fontB){
-    const {rgb,pushGraphicsState,popGraphicsState,moveTo,lineTo,closePath,fillAndStroke,setFillingColor,setStrokingColor,setLineWidth}=PDFLib;
+  function rotPt(px,py,cx,cy,deg){ if(!deg) return {x:px,y:py}; const a=deg*Math.PI/180,s=Math.sin(a),c=Math.cos(a),dx=px-cx,dy=py-cy; return {x:cx+dx*c-dy*s, y:cy+dx*s+dy*c}; }
+  // shared: draw one page's annotations. rot = page /Rotate (deg); labels/boxes/triangles are counter-rotated so they read upright in the displayed (rotated) page. view = {w,h} viewport dims.
+  function drawAnnotations(pg, conv, data, font, fontB, rot, view){
+    rot=rot||0; view=view||{w:0,h:0};
+    const pcal=data.cal||S.docCal||null;   // this page's effective scale
+    const {rgb,degrees,pushGraphicsState,popGraphicsState,moveTo,lineTo,closePath,fillAndStroke,setFillingColor,setStrokingColor,setLineWidth}=PDFLib;
     const C=hex=>{const n=(hex||'#ff7a00').replace('#','');return rgb(parseInt(n.substr(0,2),16)/255,parseInt(n.substr(2,2),16)/255,parseInt(n.substr(4,2),16)/255);};
     for(const a of data.annotations){
       const col=C(colorOf(a)); const P=a.points.map(conv);
@@ -1185,30 +1189,31 @@ function initApp(){
       const wo=S.labelMode==='scaled'?off:{dx:off.dx/(S.zoom||1),dy:off.dy/(S.zoom||1)};  // fixed offset is screen-px → world
       const lP=conv({x:aw.x+wo.dx,y:aw.y+wo.dy}); const flip=off.dx<0;
       const text = a.type==='marker' ? (a.label||'')
-                 : a.type==='area'   ? (a.label?a.label+'  ':'')+fmtAreaPlain(areaM2(a.points))
-                 :                     (a.label?a.label+'  ':'')+fmtLenPlain(lenM(a.points));
+                 : a.type==='area'   ? (a.label?a.label+'  ':'')+fmtAreaPlain(areaM2(a.points,pcal))
+                 :                     (a.label?a.label+'  ':'')+fmtLenPlain(lenM(a.points,pcal));
       if(a.type==='marker'){
         if(text) leaderLine(pg,aP,lP,col);
         if((a.icon||'circle')==='triangle'){
+          const v1=rotPt(aP.x,aP.y+6,aP.x,aP.y,rot), v2=rotPt(aP.x+5,aP.y-4,aP.x,aP.y,rot), v3=rotPt(aP.x-5,aP.y-4,aP.x,aP.y,rot);
           pg.pushOperators(
             pushGraphicsState(), setFillingColor(col), setStrokingColor(rgb(0,0,0)), setLineWidth(1),
-            moveTo(aP.x,aP.y+6), lineTo(aP.x+5,aP.y-4), lineTo(aP.x-5,aP.y-4), closePath(),
+            moveTo(v1.x,v1.y), lineTo(v2.x,v2.y), lineTo(v3.x,v3.y), closePath(),
             fillAndStroke(), popGraphicsState()
           );
         }else{
           pg.drawCircle({x:aP.x,y:aP.y,size:4,color:col,borderColor:rgb(0,0,0),borderWidth:1});
         }
-        if(text) labelBox(pg,font,lP,text,col,flip);
+        if(text) labelBox(pg,font,lP,text,col,flip,rot);
       }else if(a.type==='area'){
         for(let i=0;i<P.length;i++){const p=P[i],q=P[(i+1)%P.length];pg.drawLine({start:p,end:q,thickness:1.6,color:col});}
-        leaderLine(pg,aP,lP,col); labelBox(pg,fontB,lP,text,col,flip);
+        leaderLine(pg,aP,lP,col); labelBox(pg,fontB,lP,text,col,flip,rot);
       }else{
         for(let i=1;i<P.length;i++) pg.drawLine({start:P[i-1],end:P[i],thickness:1.6,color:col});
         P.forEach(p=>pg.drawCircle({x:p.x,y:p.y,size:2.2,color:col}));
-        leaderLine(pg,aP,lP,col); labelBox(pg,fontB,lP,text,col,flip);
+        leaderLine(pg,aP,lP,col); labelBox(pg,fontB,lP,text,col,flip,rot);
       }
     }
-    if(data.cal){ pg.drawText('Scale set · '+num(1*U[S.unit]/data.cal.metersPerPx)+' px = 1 '+UNAME[S.unit],{x:8,y:8,size:7,font,color:rgb(.3,.3,.3)}); }
+    if(pcal){ const np=conv({x:8,y:(view.h||0)-8}); pg.drawText('Scale set · '+num(1*U[S.unit]/pcal.metersPerPx)+' px = 1 '+UNAME[S.unit],{x:np.x,y:np.y,size:7,font,color:rgb(.3,.3,.3),rotate:degrees(rot)}); }
   }
   function leaderLine(pg,aP,lP,col){
     const {rgb}=PDFLib; const d=Math.hypot(lP.x-aP.x,lP.y-aP.y); if(d<6) return;
@@ -1216,11 +1221,13 @@ function initApp(){
     pg.drawLine({start:aP,end:lP,thickness:1.3,color:col});          // colored core
     pg.drawCircle({x:lP.x,y:lP.y,size:1.6,color:col});
   }
-  function labelBox(pg,font,lP,text,col,flip){
-    const {rgb}=PDFLib; const size=8.5*S.labelScale, padX=3*S.labelScale, w=font.widthOfTextAtSize(text,size), bw=w+padX*2, bh=size+5*S.labelScale;
-    const x0=flip?lP.x-bw:lP.x, cy=lP.y;
-    pg.drawRectangle({x:x0,y:cy-bh/2,width:bw,height:bh,color:rgb(1,1,1),opacity:.9,borderColor:col,borderWidth:.7});
-    pg.drawText(text,{x:x0+padX,y:cy-size/2+1.5*S.labelScale,size,font,color:rgb(.07,.09,.11)});
+  function labelBox(pg,font,lP,text,col,flip,rot){
+    const {rgb,degrees}=PDFLib; rot=rot||0;
+    const size=8.5*S.labelScale, padX=3*S.labelScale, w=font.widthOfTextAtSize(text,size), bw=w+padX*2, bh=size+5*S.labelScale;
+    const corner=rotPt(lP.x+(flip?-bw:0), lP.y-bh/2, lP.x, lP.y, rot);   // box bottom-left, rotated about lP
+    const tp=rotPt(lP.x+(flip?-bw:0)+padX, lP.y-size/2+1.5*S.labelScale, lP.x, lP.y, rot);
+    pg.drawRectangle({x:corner.x,y:corner.y,width:bw,height:bh,rotate:degrees(rot),color:rgb(1,1,1),opacity:.9,borderColor:col,borderWidth:.7});
+    pg.drawText(text,{x:tp.x,y:tp.y,size,rotate:degrees(rot),font,color:rgb(.07,.09,.11)});
   }
   async function exportPdfSource(){
     busy('Building annotated PDF…');
@@ -1235,7 +1242,8 @@ function initApp(){
         const idx=(+pn)-1; if(idx<0||idx>=pages.length) continue;
         const vp=(await S.pdfDoc.getPage(+pn)).getViewport({scale:1});
         const conv=p=>{ const a=vp.convertToPdfPoint(p.x,p.y); return {x:a[0],y:a[1]}; };
-        drawAnnotations(pages[idx], conv, data, font, fontB);
+        const rot=((pages[idx].getRotation().angle%360)+360)%360;
+        drawAnnotations(pages[idx], conv, data, font, fontB, rot, {w:vp.width,h:vp.height});
       }
       const bytes=await out.save();
       download(new Blob([bytes],{type:'application/pdf'}), 'measured-map.pdf');
@@ -1258,7 +1266,7 @@ function initApp(){
       pg.drawImage(emb,{x:0,y:0,width:S.baseW,height:S.baseH});
       const data=S.pages[1]||{annotations:[],cal:null};
       const conv=p=>({x:p.x, y:S.baseH-p.y});   // image px (top-left,y-down) -> pdf points (bottom-left,y-up)
-      drawAnnotations(pg, conv, data, font, fontB);
+      drawAnnotations(pg, conv, data, font, fontB, 0, {w:S.baseW,h:S.baseH});
       const bytes=await out.save();
       download(new Blob([bytes],{type:'application/pdf'}), 'measured-map.pdf');
       toast('Annotated PDF exported');
@@ -1281,7 +1289,7 @@ function initApp(){
     try{
       // strip transient runtime bits from the live DOM clone
       const session={
-        v:3, srcType:S.srcType, unit:S.unit, labelMode:S.labelMode, labelScale:S.labelScale, pageNum:S.pageNum, nextId:S.nextId,
+        v:3, srcType:S.srcType, unit:S.unit, labelMode:S.labelMode, labelScale:S.labelScale, docCal:S.docCal, pageNum:S.pageNum, nextId:S.nextId,
         view:{zoom:S.zoom,panX:S.panX,panY:S.panY},
         pages:{},
       };
@@ -1319,6 +1327,7 @@ function initApp(){
       S.labelScale=s.labelScale||1; applyLabelScaleUI();
       S.nextId=s.nextId||1;
       S.srcType=s.srcType||'pdf';
+      S.docCal=s.docCal||null;
       S.pages={};
       for(const k of Object.keys(s.pages)){ S.pages[k]={annotations:s.pages[k].annotations||[],cal:s.pages[k].cal||null}; }
       if(S.srcType==='image'){
@@ -1360,8 +1369,10 @@ function initApp(){
   $('#unitSel').addEventListener('change',e=>{S.unit=e.target.value;renderList();drawOverlay();updateCalCard();});
   function applyLabelModeUI(){ $('#labelModeTxt').textContent=S.labelMode==='scaled'?'Scaled':'Fixed'; $('#labelToggle').classList.toggle('active',S.labelMode==='scaled'); }
   $('#labelToggle').addEventListener('click',()=>{ S.labelMode=S.labelMode==='fixed'?'scaled':'fixed'; applyLabelModeUI(); drawOverlay(); toast('Labels: '+(S.labelMode==='scaled'?'scale with zoom':'fixed on screen')); });
-  function applyLabelScaleUI(){ $('#labelSize').value=S.labelScale; $('#labelSizePct').textContent=Math.round(S.labelScale*100)+'%'; }
-  $('#labelSize').addEventListener('input',e=>{ S.labelScale=parseFloat(e.target.value)||1; $('#labelSizePct').textContent=Math.round(S.labelScale*100)+'%'; drawOverlay(); });
+  function applyLabelScaleUI(){ $('#labelSizePct').textContent=Math.round(S.labelScale*100)+'%'; }
+  function setLabelScale(v){ S.labelScale=Math.max(0.05,Math.min(50,v)); applyLabelScaleUI(); drawOverlay(); }
+  $('#lblSmaller').onclick=()=>setLabelScale(S.labelScale/1.15);
+  $('#lblLarger').onclick=()=>setLabelScale(S.labelScale*1.15);
   $('#zIn').onclick=()=>zoomCentered(1.25); $('#zOut').onclick=()=>zoomCentered(1/1.25); $('#zFit').onclick=fitToView;
   function zoomCentered(f){const r=stageWrap.getBoundingClientRect();const lp={x:r.width/2,y:r.height/2};setZoom(S.zoom*f,s2wx(lp.x),s2wy(lp.y),lp);}
   $('#pgPrev').onclick=()=>gotoPage(S.pageNum-1); $('#pgNext').onclick=()=>gotoPage(S.pageNum+1);
