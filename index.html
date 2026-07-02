@@ -756,7 +756,7 @@ function initApp(){
       calibrate:['Click two points a known distance apart','then type the real length'],
       distance:['Click a start point, then an end point',''],
       path:['Click to add points along a path','double-click or Enter to finish'],
-      area:['Click around an area','double-click or Enter to close the polygon'],
+      area:['Click for straight edges, or hold and drag to trace a curve','double-click or Enter to close the polygon'],
       marker:['Click to drop markers — keep clicking to add more','auto-numbers & inherits style from the last marker'],
       select:['Drag a label to reposition it — it stays tethered to its feature','drag vertices to reshape · click to select'],
     };
@@ -765,7 +765,7 @@ function initApp(){
   }
 
   /* ---------------- pointer handling ---------------- */
-  let panning=false, panStart=null, spaceDown=false, moved=false, downPt=null;
+  let panning=false, panStart=null, spaceDown=false, moved=false, downPt=null, tracing=false, lastTrace=null;
 
   function localPt(e){ const r=stageWrap.getBoundingClientRect(); return {x:e.clientX-r.left,y:e.clientY-r.top}; }
   function worldPt(e){ const p=localPt(e); return {x:s2wx(p.x),y:s2wy(p.y)}; }
@@ -791,6 +791,14 @@ function initApp(){
     if(S.tool==='marker'){ pushHistory(); addMarker(worldPt(e)); return; }
     if(DRAW_TOOLS.has(S.tool)){
       const wp=worldPt(e);
+      if(S.tool==='area'){
+        // area: click drops a straight-edge vertex; holding and dragging traces a freehand curve
+        if(!S.draft) S.draft={type:'area',points:[],color:DEFCOLOR.area};
+        S.draft.points.push(wp);
+        tracing=true; lastTrace=localPt(e); S.hoverPt=wp;
+        drawOverlay(); liveForDraft();
+        return;
+      }
       if(!S.draft) S.draft={type:S.tool,points:[wp],color:DEFCOLOR[S.tool]};
       else S.draft.points.push(wp);
       // finalize 2-pt tools
@@ -819,6 +827,14 @@ function initApp(){
       if(a){ const wp=worldPt(e); a.points[S.dragVertex.idx]={x:wp.x,y:wp.y}; drawOverlay(); renderList(); }
       return;
     }
+    if(tracing && S.draft){
+      // freehand: append a point every few screen px so a drag traces the curve
+      if(Math.hypot(lp.x-lastTrace.x,lp.y-lastTrace.y)>=3 && S.draft.points.length<6000){
+        S.draft.points.push(worldPt(e)); lastTrace=lp;
+      }
+      S.hoverPt=worldPt(e); drawOverlay(); liveForDraft();
+      return;
+    }
     if(S.tool==='select'){ overlay.style.cursor = hitLabel(lp)?'move':(hitVertex(lp)?'pointer':''); }
     if(DRAW_TOOLS.has(S.tool)&&S.draft){
       S.hoverPt=worldPt(e); drawOverlay(); liveForDraft(); showCursorBadge(lp);
@@ -831,6 +847,14 @@ function initApp(){
     if(panning){ panning=false; stageWrap.classList.remove('panning'); }
     if(S.dragLabel){ pushHistory(); S.dragLabel=null; }
     if(S.dragVertex){ pushHistory(); S.dragVertex=null; }
+    if(tracing){
+      tracing=false;
+      if(S.tool==='area' && S.draft && S.draft.type==='area'){
+        const wp=worldPt(e), last=S.draft.points[S.draft.points.length-1];
+        if(!last || Math.hypot(last.x-wp.x,last.y-wp.y)*S.zoom>=2){ S.draft.points.push(wp); }  // capture exact release point
+        S.hoverPt=wp; drawOverlay(); liveForDraft();
+      }
+    }
     downPt=null;
   });
 
@@ -922,9 +946,9 @@ function initApp(){
   function finishDraft(fromDbl){
     const d=S.draft; if(!d){return;}
     if(fromDbl&&(d.type==='path'||d.type==='area')&&d.points.length>1){
-      // drop the extra point a dblclick injects (two pointerdowns at same spot)
+      // drop the near-duplicate point the two quick clicks of a double-click inject (screen-space threshold, zoom-robust)
       const last=d.points[d.points.length-1], prev=d.points[d.points.length-2];
-      if(prev&&Math.hypot(last.x-prev.x,last.y-prev.y)<2) d.points.pop();
+      if(prev&&Math.hypot(last.x-prev.x,last.y-prev.y)*S.zoom<8) d.points.pop();
     }
     if(d.type==='calibrate'){
       if(d.points.length>=2){ openCalModal('pts', segPx(d.points[0],d.points[1])); }
